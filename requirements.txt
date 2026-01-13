@@ -1,0 +1,148 @@
+# ==============================================
+# 工具项目依赖管理文件
+# 包含所有15个工具项目的完整依赖关系
+# ==============================================
+
+# ================== 核心依赖 ==================
+# 基础工具库
+typing-extensions>=4.0.0
+pathlib2>=2.3.0
+
+# ================== 项目特定依赖 ==================
+
+# ========== AutomationToolPro (自动化工具) ==========
+PyQt5>=5.15.0
+
+# ========== CodeAnalyzerPro (代码分析工具) ==========
+PyQt5>=5.15.0
+PyQtChart>=5.15.0
+
+# ========== DataVizPro (数据可视化工具) ==========
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+plotly>=5.15.0
+pyecharts>=2.0.0
+PyQt5>=5.15.0
+
+# ========== DatabaseManagerPro (数据库管理工具) ==========
+PyQt5>=5.15.0
+pymysql>=1.1.0
+psycopg2-binary>=2.9.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# ========== FinancialCalculatorPro (金融计算器) ==========
+PyQt5>=5.15.0
+
+# ========== ImageProcessorPro (图像处理工具) ==========
+PyQt5>=5.15.0
+Pillow>=10.0.0
+
+# ========== NetworkToolPro (网络工具) ==========
+PyQt5>=5.15.0
+requests>=2.25.0
+
+# ========== SecurityVaultPro (安全保险箱) ==========
+PyQt5>=5.15.0
+
+# ========== StreamForgeElite (流媒体下载工具) ==========
+yt-dlp>=2024.4.9
+
+# ========== SubMuxOmniPro (视音频处理工具) ==========
+# 主要依赖标准库和Tkinter，无需额外第三方包
+
+# ========== SystemMonitorPro (系统监控工具) ==========
+PyQt5>=5.15.0
+psutil>=5.9.0
+PyQtChart>=5.15.0
+
+# ========== TextProcessorPro (文本处理工具) ==========
+PyQt5>=5.15.0
+
+# ========== UltimateFileConverter (文件格式转换工具) ==========
+Pillow>=10.0.0
+python-docx>=1.1.0
+beautifulsoup4>=4.12.0
+pypdf>=4.0.0
+reportlab>=4.0.0
+pydub>=0.25.1
+moviepy>=2.0.0
+ebooklib>=0.18.0
+PyYAML>=6.0
+toml>=0.10.2
+qrcode>=8.0
+cairosvg>=2.7.0
+pandas>=2.0.0
+
+# ========== UltimateReader (文档阅读器) ==========
+PyQt5>=5.15.0
+PyMuPDF>=1.23.0
+python-docx>=0.8.11
+odfpy>=1.4.1
+python-pptx>=0.6.21
+Pillow>=9.0.0
+pytesseract>=0.3.10
+markdown2>=2.4.0
+
+# ========== UniversalWebCrawlerPro (网络爬虫工具) ==========
+PyQt5>=5.15.0
+playwright>=1.40.0
+aiohttp>=3.9.0
+validators>=0.22.0
+beautifulsoup4>=4.12.0
+Pillow>=10.0.0
+lxml>=4.9.0
+
+# ================== 开发工具依赖 ==================
+pytest>=7.4.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0
+
+# ================== 安装说明 ==================
+
+# 安装所有依赖（推荐）：
+# pip install -r requirements.txt
+
+# 按项目安装：
+# AutomationToolPro: pip install PyQt5
+# CodeAnalyzerPro: pip install PyQt5 PyQtChart
+# DataVizPro: pip install pandas numpy matplotlib plotly pyecharts PyQt5
+# DatabaseManagerPro: pip install PyQt5 pymysql psycopg2-binary pandas openpyxl
+# FinancialCalculatorPro: pip install PyQt5
+# ImageProcessorPro: pip install PyQt5 Pillow
+# NetworkToolPro: pip install PyQt5 requests
+# SecurityVaultPro: pip install PyQt5
+# StreamForgeElite: pip install yt-dlp
+# SubMuxOmniPro: 主要依赖标准库，无需额外安装
+# SystemMonitorPro: pip install PyQt5 psutil PyQtChart
+# TextProcessorPro: pip install PyQt5
+# UltimateFileConverter: pip install Pillow python-docx beautifulsoup4 pypdf reportlab pydub moviepy ebooklib PyYAML toml qrcode cairosvg pandas
+# UltimateReader: pip install PyQt5 PyMuPDF python-docx odfpy python-pptx Pillow pytesseract markdown2
+# UniversalWebCrawlerPro: pip install PyQt5 playwright aiohttp validators beautifulsoup4 Pillow lxml
+
+# ================== 系统级依赖 ==================
+# 以下依赖需要单独安装
+
+# FFmpeg (音频/视频处理)
+# Windows: 下载并安装FFmpeg，添加到系统PATH
+# macOS: brew install ffmpeg
+# Linux: sudo apt install ffmpeg
+
+# Calibre (电子书转换)
+# Windows: 下载并安装Calibre
+# macOS: brew install calibre
+# Linux: sudo apt install calibre
+
+# Tesseract OCR (文字识别)
+# Windows: 下载并安装Tesseract OCR，添加到系统PATH
+# macOS: brew install tesseract
+# Linux: sudo apt install tesseract-ocr
+
+# ================== 注意事项 ==================
+# 1. tkinter 是Python标准库，无需通过pip安装
+# 2. 所有包名已修正为pip可识别的正确名称
+# 3. 建议使用Python 3.8+版本
+# 4. 推荐在虚拟环境中安装
+# 5. 某些工具需要系统级依赖（如FFmpeg、Calibre、Tesseract）
