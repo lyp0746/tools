@@ -2,13 +2,20 @@
 """
 Web Content Extractor Pro - 专业网页内容提取工具
 基于PyQt5和BeautifulSoup开发，支持多平台内容提取、多格式输出、数学公式处理
-Version: 7.0
+Version: 8.1 - CSDN数学公式深度优化版
 github网址： https://github.com/lyp0746
 QQ邮箱：1610369302@qq.com
 作者：LYP
 
+优化重点:
+- CSDN数学公式深度清理(移除XML标签)
+- Markdown数学公式正确渲染
+- PDF专业书籍风格优化
+- 智能文件命名(使用文章标题)
+- 支持菜鸟教程、CSDN、GitBook三大平台
+
 功能特性:
-- 支持平台: 菜鸟教程、CSDN博客/专栏、知乎专栏、简书
+- 支持平台: 菜鸟教程、CSDN博客/专栏、GitBook文档
 - 输出格式: Markdown、HTML、PDF (专业书籍风格)
 - 数学公式: 完整LaTeX/MathJax 3.0支持
 - CSDN增强: 深度内容提取和清理
@@ -18,6 +25,7 @@ QQ邮箱：1610369302@qq.com
 import sys
 import os
 import re
+import warnings
 from pathlib import Path
 from typing import List, Tuple
 from urllib.parse import urljoin, urlparse
@@ -25,10 +33,14 @@ import time
 from datetime import datetime
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSettings
 from PyQt5.QtGui import QFont, QTextCursor
+
+# 抑制警告
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message="sipPyTypeDict")
 
 # PDF生成 - WeasyPrint 59.0+
 try:
@@ -40,6 +52,7 @@ except ImportError:
 
 
 # ======================== 数据结构 ========================
+
 class Article:
     """文章数据结构"""
     def __init__(self, title: str, url: str, level: int = 1):
@@ -54,6 +67,7 @@ class Article:
 
 
 # ======================== 爬虫基类 ========================
+
 class BaseCrawler:
     """爬虫基类 - 提供通用功能"""
     
@@ -126,62 +140,174 @@ class BaseCrawler:
         
         return soup
     
+    def clean_math_formula(self, text: str) -> str:
+        """
+        深度清理数学公式 - 移除CSDN的XML标签
+        将复杂的MathML标签转换为纯LaTeX
+        """
+        if not text:
+            return text
+        
+        # 移除所有MathML XML标签,保留纯文本公式
+        # 处理: <semantics><mrow>...</mrow><annotation encoding="application/x-tex">LATEX_HERE</annotation></semantics>
+        
+        # 提取annotation标签中的LaTeX
+        annotation_pattern = r'<annotation[^>]*encoding="application/x-tex"[^>]*>(.*?)</annotation>'
+        annotations = re.findall(annotation_pattern, text, re.DOTALL)
+        
+        if annotations:
+            # 如果找到annotation,直接使用其中的LaTeX
+            return annotations[0].strip()
+        
+        # 移除所有XML标签
+        text = re.sub(r'<[^>]+>', '', text)
+        
+        # 清理多余空格
+        text = re.sub(r'\s+', ' ', text)
+        text = text.strip()
+        
+        return text
+    
     def process_math_formulas(self, content):
         """
-        增强数学公式处理
+        增强数学公式处理 - CSDN深度优化
         支持格式:
-        - LaTeX行内: \( ... \) 或 $ ... $
-        - LaTeX块级: \[ ... \] 或 $$ ... $$
+        - LaTeX行内: \\( ... \\) 或 $ ... $
+        - LaTeX块级: \\[ ... \\] 或 $$ ... $$
         - MathJax script标签
+        - CSDN的katex/mathjax span标签
         """
-        content_str = str(content)
+        soup = BeautifulSoup(str(content), 'html.parser')
+        
+        # 处理MathJax script标签
+        for script in soup.find_all('script', type='math/tex'):
+            formula = script.string
+            if formula:
+                formula_clean = self.clean_math_formula(formula)
+                span = soup.new_tag('span', attrs={'class': 'math-inline'})
+                span.string = f'${formula_clean}$'
+                script.replace_with(span)
+        
+        for script in soup.find_all('script', type='math/tex; mode=display'):
+            formula = script.string
+            if formula:
+                formula_clean = self.clean_math_formula(formula)
+                div = soup.new_tag('div', attrs={'class': 'math-display'})
+                div.string = f'$${formula_clean}$$'
+                script.replace_with(div)
+        
+        # 处理CSDN的katex/mathjax span标签 - 深度清理
+        for span in soup.find_all('span', class_=re.compile('katex|mathjax|MathJax')):
+            # 获取原始HTML内容
+            formula_html = str(span)
+            formula_text = span.get_text()
+            
+            # 尝试提取annotation中的LaTeX
+            formula_clean = self.clean_math_formula(formula_html)
+            
+            # 如果清理后为空,使用文本内容
+            if not formula_clean or formula_clean == formula_text:
+                formula_clean = formula_text
+            
+            # 判断是行内还是块级
+            if 'display' in span.get('class', []) or 'block' in str(span.get('style', '')):
+                new_div = soup.new_tag('div', attrs={'class': 'math-display'})
+                new_div.string = f'$${formula_clean}$$'
+                span.replace_with(new_div)
+            else:
+                new_span = soup.new_tag('span', attrs={'class': 'math-inline'})
+                new_span.string = f'${formula_clean}$'
+                span.replace_with(new_span)
         
         # LaTeX行内公式: \( ... \)
+        content_str = str(soup)
         content_str = re.sub(
-            r'\\\\?\((.*?)\\\\?\)', 
+            r'\\\((.*?)\\\)', 
             r'<span class="math-inline">$\1$</span>', 
             content_str
         )
         
         # LaTeX块级公式: \[ ... \]
         content_str = re.sub(
-            r'\\\\?\[(.*?)\\\\?\]', 
+            r'\\\[(.*?)\\\]', 
             r'<div class="math-display">$$\1$$</div>', 
             content_str, 
             flags=re.DOTALL
         )
         
-        # 处理MathJax script标签
-        soup = BeautifulSoup(content_str, 'html.parser')
+        return BeautifulSoup(content_str, 'html.parser')
+    
+    def html_to_markdown(self, content) -> str:
+        """
+        增强的HTML转Markdown - 正确处理数学公式
+        """
+        lines = []
         
-        # 行内公式
-        for script in soup.find_all('script', type='math/tex'):
-            formula = script.string
-            if formula:
-                span = soup.new_tag('span', attrs={'class': 'math-inline'})
-                span.string = f'${formula}$'
-                script.replace_with(span)
+        for element in content.descendants:
+            # 跳过NavigableString
+            if isinstance(element, NavigableString):
+                continue
+            
+            tag = element.name
+            
+            # 数学公式 - 直接转换为Markdown语法
+            if tag == 'span' and 'math-inline' in element.get('class', []):
+                formula = element.get_text().strip()
+                if formula.startswith('$') and formula.endswith('$'):
+                    lines.append(formula)
+                else:
+                    lines.append(f'${formula}$')
+                continue
+            
+            if tag == 'div' and 'math-display' in element.get('class', []):
+                formula = element.get_text().strip()
+                if formula.startswith('$$') and formula.endswith('$$'):
+                    lines.append(f'\n{formula}\n')
+                else:
+                    lines.append(f'\n$${formula}$$\n')
+                continue
+            
+            # 标题
+            if tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                level = int(tag[1])
+                text = element.get_text().strip()
+                if text:
+                    lines.append(f"\n{'#' * level} {text}\n")
+                continue
+            
+            # 段落
+            if tag == 'p':
+                text = element.get_text().strip()
+                if text:
+                    lines.append(f"\n{text}\n")
+                continue
+            
+            # 代码块
+            if tag == 'pre':
+                code_tag = element.find('code')
+                lang = ''
+                if code_tag:
+                    lang_classes = code_tag.get('class', [])
+                    for cls in lang_classes:
+                        if cls.startswith('language-'):
+                            lang = cls.replace('language-', '')
+                            break
+                code_text = element.get_text()
+                lines.append(f"\n```{lang}\n{code_text}\n```\n")
+                continue
+            
+            # 引用
+            if tag == 'blockquote':
+                text = element.get_text().strip()
+                if text:
+                    lines.append(f"\n> {text}\n")
+                continue
         
-        # 块级公式
-        for script in soup.find_all('script', type='math/tex; mode=display'):
-            formula = script.string
-            if formula:
-                div = soup.new_tag('div', attrs={'class': 'math-display'})
-                div.string = f'$${formula}$$'
-                script.replace_with(div)
-        
-        # 处理CSDN的公式标记
-        for span in soup.find_all('span', class_=re.compile('katex|mathjax')):
-            formula_text = span.get_text()
-            if formula_text:
-                new_span = soup.new_tag('span', attrs={'class': 'math-inline'})
-                new_span.string = f'${formula_text}$'
-                span.replace_with(new_span)
-        
-        return soup
+        return ''.join(lines)
 
 
 # ======================== 菜鸟教程爬虫 ========================
+
 class RunoobCrawler(BaseCrawler):
     """菜鸟教程爬虫"""
     
@@ -256,34 +382,12 @@ class RunoobCrawler(BaseCrawler):
         except Exception as e:
             article.content = f"_提取失败: {str(e)}_"
             article.html_content = f"<p><em>提取失败: {str(e)}</em></p>"
-    
-    def html_to_markdown(self, content) -> str:
-        lines = []
-        for element in content.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'pre', 'ul', 'ol', 'blockquote']):
-            tag = element.name
-            text = element.get_text().strip()
-            
-            if tag == 'h1' and text:
-                lines.append(f"\n# {text}\n")
-            elif tag == 'h2' and text:
-                lines.append(f"\n## {text}\n")
-            elif tag == 'h3' and text:
-                lines.append(f"\n### {text}\n")
-            elif tag == 'h4' and text:
-                lines.append(f"\n#### {text}\n")
-            elif tag == 'p' and text:
-                lines.append(f"\n{text}\n")
-            elif tag == 'pre':
-                lines.append(f"\n```\n{element.get_text()}\n```\n")
-            elif tag == 'blockquote' and text:
-                lines.append(f"\n> {text}\n")
-        
-        return ''.join(lines)
 
 
-# ======================== CSDN爬虫 - 增强版 ========================
+# ======================== CSDN爬虫 - 数学公式深度优化版 ========================
+
 class CSDNCrawler(BaseCrawler):
-    """CSDN博客爬虫 - 增强内容提取"""
+    """CSDN博客爬虫 - 数学公式深度优化"""
     
     def __init__(self):
         super().__init__()
@@ -331,7 +435,7 @@ class CSDNCrawler(BaseCrawler):
                 links = soup.find_all('a', href=re.compile('/article/details/'))
                 for link in links:
                     title = link.get_text().strip()
-                    if title and len(title) > 5:
+                    if title and len(title) > 3:
                         href = link.get('href')
                         if not href.startswith('http'):
                             href = urljoin('https://blog.csdn.net', href)
@@ -402,7 +506,7 @@ class CSDNCrawler(BaseCrawler):
             print(f"提取文章信息失败: {e}")
     
     def extract_article_content(self, article: Article, download_images: bool, img_dir: str):
-        """增强的内容提取"""
+        """增强的内容提取 - 数学公式深度优化"""
         try:
             self.extract_article_info(article)
             
@@ -442,8 +546,8 @@ class CSDNCrawler(BaseCrawler):
                 for tag in content.find_all(class_=re.compile(pattern, re.I)):
                     tag.decompose()
             
-            # 移除"已收录"等提示
-            for tag in content.find_all(text=re.compile('已收录|版权声明|©️|查看原文')):
+            # 修复: 使用 string 参数替代 text 参数
+            for tag in content.find_all(string=re.compile('已收录|版权声明|©️|查看原文')):
                 parent = tag.parent
                 if parent:
                     parent.decompose()
@@ -460,7 +564,7 @@ class CSDNCrawler(BaseCrawler):
                         if not img.get('alt'):
                             img['alt'] = 'image'
             
-            # 处理数学公式 - 增强支持
+            # 处理数学公式 - 深度优化
             content = self.process_math_formulas(content)
             
             # 处理代码块
@@ -468,10 +572,12 @@ class CSDNCrawler(BaseCrawler):
                 # 保留代码块的语言标识
                 code_tag = pre.find('code')
                 if code_tag:
-                    lang = code_tag.get('class', [''])[0]
-                    if lang.startswith('language-'):
-                        lang = lang.replace('language-', '')
-                        pre['data-lang'] = lang
+                    lang_classes = code_tag.get('class', [])
+                    for cls in lang_classes:
+                        if cls.startswith('language-'):
+                            lang = cls.replace('language-', '')
+                            pre['data-lang'] = lang
+                            break
                 pre['class'] = 'code-block'
             
             article.html_content = str(content)
@@ -480,72 +586,126 @@ class CSDNCrawler(BaseCrawler):
         except Exception as e:
             article.content = f"_提取失败: {str(e)}_"
             article.html_content = f"<p><em>提取失败: {str(e)}</em></p>"
+
+
+# ======================== GitBook爬虫 ========================
+
+class GitBookCrawler(BaseCrawler):
+    """GitBook文档爬虫"""
     
-    def html_to_markdown(self, content) -> str:
-        lines = []
-        for element in content.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'pre', 'blockquote']):
-            tag = element.name
-            text = element.get_text().strip()
-            
-            if tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] and text:
-                level = int(tag[1])
-                lines.append(f"\n{'#' * level} {text}\n")
-            elif tag == 'p' and text:
-                lines.append(f"\n{text}\n")
-            elif tag == 'pre':
-                # 尝试获取语言标识
-                lang = element.get('data-lang', '')
-                lines.append(f"\n```{lang}\n{element.get_text()}\n```\n")
-            elif tag == 'blockquote' and text:
-                lines.append(f"\n> {text}\n")
+    def extract_gitbook_info(self, url: str) -> Tuple[str, List[Article]]:
+        """提取GitBook的文档结构"""
+        response = self.session.get(url, headers=self.headers, timeout=15)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        return ''.join(lines)
-
-
-# ======================== 知乎爬虫 ========================
-class ZhihuCrawler(BaseCrawler):
-    """知乎专栏爬虫"""
-    
-    def __init__(self):
-        super().__init__()
-        self.headers.update({
-            'Referer': 'https://www.zhihu.com/',
-        })
+        # 提取标题
+        title_tag = soup.find('h1') or soup.find('title')
+        title = title_tag.get_text().strip() if title_tag else "GitBook文档"
+        
+        # 提取目录/章节
+        articles = []
+        
+        # GitBook通常有导航栏或目录
+        nav_selectors = [
+            ('nav', {'class': re.compile('book-summary|navigation|sidebar')}),
+            ('div', {'class': re.compile('toc|summary|navigation')}),
+            ('aside', {}),
+        ]
+        
+        nav = None
+        for tag, attrs in nav_selectors:
+            nav = soup.find(tag, attrs)
+            if nav:
+                break
+        
+        if nav:
+            # 提取所有链接
+            links = nav.find_all('a', href=True)
+            for link in links:
+                href = link.get('href')
+                if href and not href.startswith('#') and not href.startswith('javascript'):
+                    # 跳过外部链接
+                    if href.startswith('http') and urlparse(href).netloc != urlparse(url).netloc:
+                        continue
+                    
+                    full_url = urljoin(url, href)
+                    link_title = link.get_text().strip()
+                    if link_title and len(link_title) > 1:
+                        articles.append(Article(link_title, full_url))
+        
+        # 如果没找到导航，至少添加当前页
+        if not articles:
+            articles.append(Article(title, url))
+        
+        # 去重
+        seen = set()
+        unique = []
+        for art in articles:
+            if art.url not in seen:
+                seen.add(art.url)
+                unique.append(art)
+        
+        return title, unique
     
     def extract_article_content(self, article: Article, download_images: bool, img_dir: str):
+        """提取GitBook文章内容"""
         try:
             response = self.session.get(article.url, headers=self.headers, timeout=15)
             response.encoding = 'utf-8'
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 提取标题
-            if not article.title or article.title == "未命名":
-                title_tag = soup.find('h1', class_='Post-Title') or soup.find('h1')
-                article.title = title_tag.get_text().strip() if title_tag else "未知文章"
+            # GitBook内容区域选择器
+            content_selectors = [
+                ('div', {'class': re.compile('page-wrapper|markdown-section|book-body')}),
+                ('article', {}),
+                ('main', {}),
+                ('div', {'class': 'content'}),
+            ]
             
-            # 提取作者
-            author_tag = soup.find('meta', attrs={'name': 'author'})
-            article.author = author_tag.get('content') if author_tag else "未知作者"
-            
-            # 提取内容
-            content = soup.find('div', class_='Post-RichText') or soup.find('div', class_='RichText')
+            content = None
+            for tag, attrs in content_selectors:
+                content = soup.find(tag, attrs)
+                if content:
+                    break
             
             if not content:
                 article.content = "_内容获取失败_"
                 article.html_content = "<p><em>内容获取失败</em></p>"
                 return
             
+            # 清理HTML
             content = self.clean_html(content)
+            
+            # 移除导航元素
+            for tag in content.find_all(class_=re.compile('navigation|sidebar|toc-menu')):
+                tag.decompose()
+            
+            # 处理数学公式
             content = self.process_math_formulas(content)
             
             # 处理图片
             if download_images:
                 for img in content.find_all('img'):
-                    src = img.get('src') or img.get('data-original') or img.get('data-actualsrc')
+                    src = img.get('src') or img.get('data-src')
                     if src:
                         img_url = urljoin(article.url, src)
                         local_path = self.download_image(img_url, img_dir, article.url)
                         img['src'] = local_path
+                        if not img.get('alt'):
+                            img['alt'] = 'image'
+            
+            # 处理代码块
+            for pre in content.find_all('pre'):
+                code_tag = pre.find('code')
+                if code_tag:
+                    lang_classes = code_tag.get('class', [])
+                    for cls in lang_classes:
+                        if cls.startswith('language-'):
+                            lang = cls.replace('language-', '')
+                            pre['data-lang'] = lang
+                            break
+                pre['class'] = 'code-block'
             
             article.html_content = str(content)
             article.content = self.html_to_markdown(content)
@@ -553,98 +713,10 @@ class ZhihuCrawler(BaseCrawler):
         except Exception as e:
             article.content = f"_提取失败: {str(e)}_"
             article.html_content = f"<p><em>提取失败: {str(e)}</em></p>"
-    
-    def html_to_markdown(self, content) -> str:
-        lines = []
-        for element in content.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'pre', 'blockquote']):
-            tag = element.name
-            text = element.get_text().strip()
-            
-            if tag in ['h1', 'h2', 'h3', 'h4'] and text:
-                level = int(tag[1])
-                lines.append(f"\n{'#' * level} {text}\n")
-            elif tag == 'p' and text:
-                lines.append(f"\n{text}\n")
-            elif tag == 'pre':
-                lines.append(f"\n```\n{element.get_text()}\n```\n")
-            elif tag == 'blockquote' and text:
-                lines.append(f"\n> {text}\n")
-        
-        return ''.join(lines)
-
-
-# ======================== 简书爬虫 ========================
-class JianshuCrawler(BaseCrawler):
-    """简书爬虫"""
-    
-    def __init__(self):
-        super().__init__()
-        self.headers.update({
-            'Referer': 'https://www.jianshu.com/',
-        })
-    
-    def extract_article_content(self, article: Article, download_images: bool, img_dir: str):
-        try:
-            response = self.session.get(article.url, headers=self.headers, timeout=15)
-            response.encoding = 'utf-8'
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # 提取标题
-            if not article.title or article.title == "未命名":
-                title_tag = soup.find('h1', class_='title') or soup.find('h1')
-                article.title = title_tag.get_text().strip() if title_tag else "未知文章"
-            
-            # 提取作者
-            author_tag = soup.find('a', class_='author')
-            article.author = author_tag.get_text().strip() if author_tag else "未知作者"
-            
-            # 提取内容
-            content = soup.find('article') or soup.find('div', class_='show-content')
-            
-            if not content:
-                article.content = "_内容获取失败_"
-                article.html_content = "<p><em>内容获取失败</em></p>"
-                return
-            
-            content = self.clean_html(content)
-            content = self.process_math_formulas(content)
-            
-            # 处理图片
-            if download_images:
-                for img in content.find_all('img'):
-                    src = img.get('src') or img.get('data-original-src')
-                    if src:
-                        img_url = urljoin(article.url, src)
-                        local_path = self.download_image(img_url, img_dir, article.url)
-                        img['src'] = local_path
-            
-            article.html_content = str(content)
-            article.content = self.html_to_markdown(content)
-            
-        except Exception as e:
-            article.content = f"_提取失败: {str(e)}_"
-            article.html_content = f"<p><em>提取失败: {str(e)}</em></p>"
-    
-    def html_to_markdown(self, content) -> str:
-        lines = []
-        for element in content.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'pre', 'blockquote']):
-            tag = element.name
-            text = element.get_text().strip()
-            
-            if tag in ['h1', 'h2', 'h3', 'h4'] and text:
-                level = int(tag[1])
-                lines.append(f"\n{'#' * level} {text}\n")
-            elif tag == 'p' and text:
-                lines.append(f"\n{text}\n")
-            elif tag == 'pre':
-                lines.append(f"\n```\n{element.get_text()}\n```\n")
-            elif tag == 'blockquote' and text:
-                lines.append(f"\n> {text}\n")
-        
-        return ''.join(lines)
 
 
 # ======================== 爬虫线程 ========================
+
 class CrawlerThread(QThread):
     """爬虫线程 - 增强版"""
     progress_signal = pyqtSignal(str)
@@ -670,10 +742,8 @@ class CrawlerThread(QThread):
                 self.crawl_runoob()
             elif self.platform == 'csdn':
                 self.crawl_csdn()
-            elif self.platform == 'zhihu':
-                self.crawl_zhihu()
-            elif self.platform == 'jianshu':
-                self.crawl_jianshu()
+            elif self.platform == 'gitbook':
+                self.crawl_gitbook()
             
             self.finished_signal.emit(True, f"✅ 完成!\n保存位置: {os.path.abspath(self.output_dir)}")
             
@@ -711,154 +781,133 @@ class CrawlerThread(QThread):
         if self.aggregate_mode:
             self.generate_files(title, articles, "菜鸟教程")
         else:
-            self.generate_separate_files(articles, "菜鸟教程")
+            self.generate_separate_files(articles)
     
     def crawl_csdn(self):
         self.progress_signal.emit("📖 正在分析CSDN...")
         
         crawler = CSDNCrawler()
         
-        if '/category_' in self.url or '/column/' in self.url:
-            self.progress_signal.emit("📚 检测到专栏，正在提取文章列表...")
+        # 判断是专栏还是单篇文章
+        if '/column/info/' in self.url or '/category_' in self.url:
+            # 专栏模式
             articles = crawler.extract_column_articles(self.url)
-            
             if not articles:
                 raise Exception("未找到任何文章")
             
-            self.progress_signal.emit(f"📑 共 {len(articles)} 篇文章")
-            
-            img_dir = os.path.join(self.output_dir, 'images')
-            
-            for idx, article in enumerate(articles, 1):
-                if not self.is_running:
-                    return
-                
-                self.progress_signal.emit(f"📄 [{idx}/{len(articles)}] {article.title}")
-                crawler.extract_article_content(article, self.download_images, img_dir)
-                time.sleep(1)
-            
-            title = articles[0].author + "的CSDN专栏" if articles else "CSDN专栏"
-            
-            if self.aggregate_mode:
-                self.generate_files(title, articles, articles[0].author if articles else "未知作者")
-            else:
-                self.generate_separate_files(articles, articles[0].author if articles else "未知作者")
-            
+            title = f"CSDN专栏_{len(articles)}篇"
+            self.progress_signal.emit(f"📚 专栏: {len(articles)}篇文章")
         else:
-            article = Article("未命名", self.url)
+            # 单篇文章模式
+            articles = [Article("未命名", self.url)]
+            title = "CSDN文章"
+            self.progress_signal.emit(f"📄 单篇文章")
+        
+        img_dir = os.path.join(self.output_dir, 'images')
+        
+        for idx, article in enumerate(articles, 1):
+            if not self.is_running:
+                return
             
-            img_dir = os.path.join(self.output_dir, 'images')
-            self.progress_signal.emit("📄 正在提取文章内容...")
+            self.progress_signal.emit(f"📄 [{idx}/{len(articles)}] 提取中...")
             crawler.extract_article_content(article, self.download_images, img_dir)
+            time.sleep(1)  # CSDN需要更长延迟
+        
+        # 根据模式生成文件
+        if self.aggregate_mode and len(articles) > 1:
+            self.generate_files(title, articles, articles[0].author if articles else "")
+        else:
+            self.generate_separate_files(articles)
+    
+    def crawl_gitbook(self):
+        self.progress_signal.emit("📖 正在分析GitBook...")
+        
+        crawler = GitBookCrawler()
+        title, articles = crawler.extract_gitbook_info(self.url)
+        
+        if not articles:
+            raise Exception("未找到任何章节")
+        
+        self.progress_signal.emit(f"📚 文档: {title}")
+        self.progress_signal.emit(f"📑 共 {len(articles)} 个章节")
+        
+        img_dir = os.path.join(self.output_dir, 'images')
+        
+        for idx, article in enumerate(articles, 1):
+            if not self.is_running:
+                return
             
-            self.generate_files(article.title, [article], article.author)
+            self.progress_signal.emit(f"📄 [{idx}/{len(articles)}] {article.title}")
+            crawler.extract_article_content(article, self.download_images, img_dir)
+            time.sleep(0.5)
+        
+        # 根据模式生成文件
+        if self.aggregate_mode:
+            self.generate_files(title, articles, "GitBook")
+        else:
+            self.generate_separate_files(articles)
     
-    def crawl_zhihu(self):
-        """爬取知乎专栏"""
-        self.progress_signal.emit("📖 正在分析知乎...")
-        
-        crawler = ZhihuCrawler()
-        article = Article("未命名", self.url)
-        
-        img_dir = os.path.join(self.output_dir, 'images')
-        self.progress_signal.emit("📄 正在提取文章内容...")
-        crawler.extract_article_content(article, self.download_images, img_dir)
-        
-        self.generate_files(article.title, [article], article.author)
-    
-    def crawl_jianshu(self):
-        """爬取简书"""
-        self.progress_signal.emit("📖 正在分析简书...")
-        
-        crawler = JianshuCrawler()
-        article = Article("未命名", self.url)
-        
-        img_dir = os.path.join(self.output_dir, 'images')
-        self.progress_signal.emit("📄 正在提取文章内容...")
-        crawler.extract_article_content(article, self.download_images, img_dir)
-        
-        self.generate_files(article.title, [article], article.author)
-    
-    def generate_separate_files(self, articles: List[Article], author: str):
-        """非聚合模式 - 每篇文章单独保存"""
-        self.progress_signal.emit("📝 非聚合模式：每篇文章单独保存...")
-        
+    def generate_separate_files(self, articles: List[Article]):
+        """每篇文章独立文件 - 使用文章标题命名"""
         for idx, article in enumerate(articles, 1):
             if not self.is_running:
                 return
             
             # 使用文章标题作为文件名
             safe_title = re.sub(r'[\\/:"*?<>|]+', '_', article.title)
-            safe_title = safe_title.strip()[:100]
+            safe_title = safe_title.strip()[:100]  # 限制长度
             
-            if not safe_title:
+            if not safe_title or safe_title == "未命名":
                 safe_title = f"文章_{idx}"
             
-            # Markdown
             if 'markdown' in self.output_formats:
                 md_path = os.path.join(self.output_dir, f"{safe_title}.md")
-                self.generate_markdown(md_path, article.title, [article], author)
+                self.generate_markdown(md_path, article.title, [article], article.author)
             
-            # HTML
-            html_path = None
-            if 'html' in self.output_formats or 'pdf' in self.output_formats:
+            if 'html' in self.output_formats:
                 html_path = os.path.join(self.output_dir, f"{safe_title}.html")
-                self.generate_html(html_path, article.title, [article], author)
+                self.generate_html(html_path, article.title, [article], article.author)
             
-            # PDF
-            if 'pdf' in self.output_formats and WEASY_AVAILABLE and html_path:
+            if 'pdf' in self.output_formats and WEASY_AVAILABLE:
                 pdf_path = os.path.join(self.output_dir, f"{safe_title}.pdf")
-                self.generate_pdf_professional(html_path, pdf_path)
+                self.generate_pdf(pdf_path, article.title, [article], article.author)
             
             self.progress_signal.emit(f"✅ [{idx}/{len(articles)}] {safe_title}")
     
     def generate_files(self, title: str, articles: List[Article], author: str):
-        """聚合模式 - 所有文章合并成一个文件"""
-        # 修复文件名
-        safe_title = re.sub(r'[\\/:"*?<>|]+', '_', title)
+        """聚合模式 - 使用标题命名"""
+        # 智能文件名
+        if articles and articles[0].title and articles[0].title != "未命名":
+            safe_title = re.sub(r'[\\/:"*?<>|]+', '_', articles[0].title)
+        else:
+            safe_title = re.sub(r'[\\/:"*?<>|]+', '_', title)
+        
         safe_title = safe_title.strip()[:100]
-        
         if not safe_title:
-            safe_title = "未命名文档"
+            safe_title = "文档"
         
-        # Markdown
         if 'markdown' in self.output_formats:
-            self.progress_signal.emit("📝 生成Markdown...")
             md_path = os.path.join(self.output_dir, f"{safe_title}.md")
             self.generate_markdown(md_path, title, articles, author)
         
-        # HTML
-        html_path = None
-        if 'html' in self.output_formats or 'pdf' in self.output_formats:
-            self.progress_signal.emit("🌐 生成HTML...")
+        if 'html' in self.output_formats:
             html_path = os.path.join(self.output_dir, f"{safe_title}.html")
             self.generate_html(html_path, title, articles, author)
         
-        # PDF - 专业书籍风格
-        if 'pdf' in self.output_formats and WEASY_AVAILABLE and html_path:
-            self.progress_signal.emit("📄 生成专业PDF (这可能需要一些时间)...")
+        if 'pdf' in self.output_formats and WEASY_AVAILABLE:
             pdf_path = os.path.join(self.output_dir, f"{safe_title}.pdf")
-            self.generate_pdf_professional(html_path, pdf_path)
+            self.generate_pdf(pdf_path, title, articles, author)
     
-    def generate_markdown(self, path: str, title: str, articles: List[Article], author: str):
-        """生成Markdown文件"""
-        with open(path, 'w', encoding='utf-8') as f:
+    def generate_markdown(self, filepath: str, title: str, articles: List[Article], author: str):
+        """生成Markdown文件 - 优化数学公式"""
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(f"# {title}\n\n")
             f.write(f"> **作者**: {author}\n")
-            f.write(f"> **生成时间**: {datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')}\n\n")
+            f.write(f"> **生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write("---\n\n")
             
-            # 目录（仅在多篇文章时显示）
-            if len(articles) > 1:
-                f.write("## 📑 目录\n\n")
-                for idx, art in enumerate(articles, 1):
-                    f.write(f"{idx}. [{art.title}](#{idx})\n")
-                f.write("\n---\n\n")
-            
-            # 内容
             for idx, art in enumerate(articles, 1):
                 if len(articles) > 1:
-                    f.write(f'<div id="{idx}"></div>\n\n')
                     f.write(f"## {idx}. {art.title}\n\n")
                 else:
                     f.write(f"## {art.title}\n\n")
@@ -867,1058 +916,605 @@ class CrawlerThread(QThread):
                     f.write(f"**作者**: {art.author}  \n")
                 if art.date:
                     f.write(f"**日期**: {art.date}  \n")
-                if art.category:
-                    f.write(f"**分类**: {art.category}  \n")
+                if art.url:
+                    f.write(f"**原文**: {art.url}  \n")
                 
                 f.write("\n")
                 f.write(art.content)
                 f.write("\n\n---\n\n")
-            
-            f.write("\n\n**本文档由网页内容提取器生成，仅供学习使用**\n")
         
-        self.progress_signal.emit(f"✅ Markdown: {os.path.basename(path)}")
+        self.progress_signal.emit(f"✅ Markdown: {os.path.basename(filepath)}")
     
-    def generate_html(self, path: str, title: str, articles: List[Article], author: str):
-        """生成HTML文件 - GitBook专业风格 + 数学公式增强"""
-        html = f"""<!DOCTYPE html>
+    def generate_html(self, filepath: str, title: str, articles: List[Article], platform: str):
+        """生成HTML文件 - 增强数学公式支持"""
+        html_template = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="author" content="{author}">
     <title>{title}</title>
-    
-    <!-- 数学公式支持 - MathJax 3.0 -->
-    <script>
-        window.MathJax = {{
-            tex: {{
-                inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
-                displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
-                processEscapes: true,
-                processEnvironments: true,
-                tags: 'ams',
-                autoload: {{
-                    color: [],
-                    colorV2: ['color']
-                }},
-                packages: {{'[+]': ['noerrors']}}
-            }},
-            options: {{
-                skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre'],
-                ignoreHtmlClass: 'tex2jax_ignore',
-                processHtmlClass: 'tex2jax_process'
-            }},
-            loader: {{
-                load: ['[tex]/noerrors']
-            }}
-        }};
-    </script>
-    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
-    
     <style>
-        /* ==================== 专业书籍风格 - GitBook优化版 ==================== */
-        
-        /* 页面设置 */
-        @page {{
-            size: A4;
-            margin: 25mm 20mm;
-            
-            @top-center {{
-                content: "{title}";
-                font-size: 9pt;
-                color: #999;
-            }}
-            
-            @bottom-center {{
-                content: "第 " counter(page) " 页";
-                font-size: 9pt;
-                color: #999;
-            }}
-        }}
-        
-        /* 基础样式 */
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        
-        html {{
-            font-size: 16px;
-        }}
-        
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', 
-                         'Hiragino Sans GB', 'Noto Sans CJK SC', 'Source Han Sans CN', sans-serif;
-            font-size: 1rem;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Microsoft YaHei";
             line-height: 1.8;
-            color: #2c3e50;
-            background: #ffffff;
-            text-rendering: optimizeLegibility;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
+            color: #333;
+            background: #f5f5f5;
+            padding: 20px;
         }}
-        
-        /* 容器 */
-        .book-container {{
+        .container {{
             max-width: 900px;
             margin: 0 auto;
-            padding: 40px 30px;
-        }}
-        
-        /* 封面页 */
-        .book-cover {{
-            text-align: center;
-            padding: 100px 40px;
-            page-break-after: always;
-            border-bottom: 3px solid #3498db;
-        }}
-        
-        .book-cover h1 {{
-            font-size: 3rem;
-            font-weight: 700;
-            color: #2c3e50;
-            margin-bottom: 30px;
-            line-height: 1.3;
-            letter-spacing: 2px;
-        }}
-        
-        .book-meta {{
-            font-size: 1.1rem;
-            color: #7f8c8d;
-            margin: 20px 0;
-            line-height: 2;
-        }}
-        
-        .book-meta strong {{
-            color: #34495e;
-            font-weight: 600;
-        }}
-        
-        /* 目录 */
-        .toc {{
-            page-break-after: always;
-            padding: 40px 0;
-        }}
-        
-        .toc-title {{
-            font-size: 2.2rem;
-            font-weight: 700;
-            color: #2c3e50;
-            margin-bottom: 40px;
-            padding-bottom: 15px;
-            border-bottom: 3px solid #3498db;
-        }}
-        
-        .toc ul {{
-            list-style: none;
-            padding: 0;
-        }}
-        
-        .toc li {{
-            margin: 15px 0;
-            padding-left: 30px;
-            position: relative;
-            font-size: 1.05rem;
-            line-height: 1.8;
-        }}
-        
-        .toc li::before {{
-            content: "▪";
-            position: absolute;
-            left: 10px;
-            color: #3498db;
-            font-size: 1.2rem;
-        }}
-        
-        .toc a {{
-            color: #34495e;
-            text-decoration: none;
-            transition: color 0.2s;
-            border-bottom: 1px solid transparent;
-        }}
-        
-        .toc a:hover {{
-            color: #3498db;
-            border-bottom-color: #3498db;
-        }}
-        
-        /* 章节 */
-        .chapter {{
-            page-break-before: always;
-            padding: 30px 0;
-            margin-bottom: 50px;
-        }}
-        
-        .chapter-title {{
-            font-size: 2.4rem;
-            font-weight: 700;
-            color: #2c3e50;
-            margin-bottom: 25px;
-            padding-bottom: 15px;
-            border-bottom: 3px solid #3498db;
-            line-height: 1.3;
-        }}
-        
-        .chapter-meta {{
-            font-size: 0.95rem;
-            color: #7f8c8d;
-            margin-bottom: 30px;
-            padding: 12px 20px;
-            background: #f8f9fa;
-            border-left: 4px solid #3498db;
-            border-radius: 4px;
-        }}
-        
-        /* 标题层级 */
-        .chapter h1, .chapter h2, .chapter h3, .chapter h4, .chapter h5, .chapter h6 {{
-            font-weight: 600;
-            line-height: 1.4;
-            margin-top: 35px;
-            margin-bottom: 18px;
-            color: #2c3e50;
-        }}
-        
-        .chapter h1 {{ font-size: 2.2rem; border-bottom: 2px solid #ecf0f1; padding-bottom: 12px; }}
-        .chapter h2 {{ font-size: 1.9rem; }}
-        .chapter h3 {{ font-size: 1.6rem; color: #34495e; }}
-        .chapter h4 {{ font-size: 1.3rem; color: #34495e; }}
-        .chapter h5 {{ font-size: 1.1rem; color: #34495e; }}
-        .chapter h6 {{ font-size: 1rem; color: #34495e; }}
-        
-        /* 段落 */
-        .chapter p {{
-            margin: 18px 0;
-            font-size: 1.05rem;
-            line-height: 1.9;
-            text-align: justify;
-            text-justify: inter-ideograph;
-            color: #34495e;
-        }}
-        
-        .chapter p:first-of-type {{
-            margin-top: 0;
-        }}
-        
-        /* 代码块 */
-        .code-block, pre {{
-            background: #282c34;
-            color: #abb2bf;
-            padding: 20px 25px;
-            border-radius: 6px;
-            overflow-x: auto;
-            margin: 25px 0;
-            font-family: 'Consolas', 'Monaco', 'Courier New', 'Source Code Pro', monospace;
-            font-size: 0.92rem;
-            line-height: 1.6;
-            border: 1px solid #21252b;
+            background: white;
+            padding: 40px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-radius: 8px;
         }}
-        
-        pre code {{
-            background: transparent;
-            padding: 0;
-            border: none;
-            color: inherit;
-            font-size: inherit;
+        h1 {{
+            font-size: 2.5em;
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 15px;
+            margin-bottom: 30px;
         }}
-        
-        /* 行内代码 */
-        code {{
-            background: #f8f9fa;
-            color: #e74c3c;
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 0.92em;
-            border: 1px solid #ecf0f1;
+        h2 {{
+            font-size: 2em;
+            color: #34495e;
+            margin-top: 40px;
+            margin-bottom: 20px;
+            padding-left: 15px;
+            border-left: 5px solid #3498db;
         }}
-        
-        /* 数学公式样式 - 增强版 */
-        .math-inline {{
-            font-family: 'Latin Modern Math', 'STIX Two Math', 'Cambria Math', 'Times New Roman', serif;
-            color: #c0392b;
-            font-size: 1.05em;
-            padding: 0 2px;
+        h3 {{
+            font-size: 1.5em;
+            color: #555;
+            margin-top: 30px;
+            margin-bottom: 15px;
         }}
-        
-        .math-display {{
-            font-family: 'Latin Modern Math', 'STIX Two Math', 'Cambria Math', 'Times New Roman', serif;
-            text-align: center;
-            margin: 25px 0;
+        .meta {{
+            background: #ecf0f1;
             padding: 20px;
-            background: #f8f9fa;
-            border-radius: 6px;
-            border: 1px solid #ecf0f1;
-            overflow-x: auto;
+            border-radius: 5px;
+            margin-bottom: 30px;
+            font-size: 0.95em;
         }}
-        
-        /* MathJax全局设置 */
-        mjx-container {{
-            font-size: 1.05em !important;
+        .meta strong {{
+            color: #2980b9;
         }}
-        
-        mjx-container[display="true"] {{
-            margin: 25px 0 !important;
+        .article {{
+            margin-bottom: 50px;
+            padding-bottom: 30px;
+            border-bottom: 2px dashed #ddd;
         }}
-        
-        /* 表格 */
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 30px 0;
-            font-size: 0.98rem;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            border-radius: 6px;
-            overflow: hidden;
-        }}
-        
-        thead {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }}
-        
-        th {{
-            padding: 15px 18px;
-            text-align: left;
-            font-weight: 600;
-            font-size: 1rem;
-        }}
-        
-        td {{
-            padding: 13px 18px;
-            border-bottom: 1px solid #ecf0f1;
-        }}
-        
-        tr:hover {{
-            background: #f8f9fa;
-        }}
-        
-        tr:last-child td {{
+        .article:last-child {{
             border-bottom: none;
         }}
-        
-        /* 图片 */
+        .article-meta {{
+            color: #7f8c8d;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+        }}
+        p {{
+            margin: 15px 0;
+            text-align: justify;
+        }}
         img {{
             max-width: 100%;
             height: auto;
             display: block;
-            margin: 30px auto;
-            border-radius: 6px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+            margin: 20px auto;
+            border-radius: 5px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         }}
-        
-        /* 列表 */
-        ul, ol {{
+        .code-block, pre {{
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 20px;
+            border-radius: 5px;
+            overflow-x: auto;
             margin: 20px 0;
-            padding-left: 35px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 0.9em;
+            line-height: 1.5;
         }}
-        
-        li {{
-            margin: 12px 0;
-            line-height: 1.8;
-            font-size: 1.02rem;
-        }}
-        
-        ul li {{
-            list-style-type: disc;
-        }}
-        
-        ul ul li {{
-            list-style-type: circle;
-        }}
-        
-        ol li {{
-            list-style-type: decimal;
-        }}
-        
-        /* 引用块 */
         blockquote {{
             border-left: 4px solid #3498db;
-            padding: 15px 25px;
-            margin: 25px 0;
-            background: #f8f9fa;
+            padding-left: 20px;
+            margin: 20px 0;
             color: #555;
-            font-style: italic;
-            border-radius: 0 6px 6px 0;
+            background: #f9f9f9;
+            padding: 15px 20px;
+            border-radius: 0 5px 5px 0;
         }}
-        
-        blockquote p {{
-            margin: 8px 0;
+        /* 数学公式样式 */
+        .math-inline {{
+            display: inline;
+            margin: 0 2px;
         }}
-        
-        /* 分隔线 */
-        hr {{
-            border: none;
-            border-top: 2px solid #ecf0f1;
-            margin: 40px 0;
+        .math-display {{
+            display: block;
+            margin: 20px 0;
+            text-align: center;
+            overflow-x: auto;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 5px;
         }}
-        
-        /* 链接 */
         a {{
             color: #3498db;
             text-decoration: none;
-            border-bottom: 1px solid transparent;
-            transition: all 0.2s;
         }}
-        
         a:hover {{
-            color: #2980b9;
-            border-bottom-color: #2980b9;
+            text-decoration: underline;
         }}
-        
-        /* 注释/提示框 */
-        .note, .tip, .warning {{
-            padding: 18px 25px;
-            margin: 25px 0;
-            border-radius: 6px;
-            border-left: 4px solid;
-        }}
-        
-        .note {{
-            background: #e3f2fd;
-            border-color: #2196f3;
-            color: #1565c0;
-        }}
-        
-        .tip {{
-            background: #e8f5e9;
-            border-color: #4caf50;
-            color: #2e7d32;
-        }}
-        
-        .warning {{
-            background: #fff3e0;
-            border-color: #ff9800;
-            color: #e65100;
-        }}
-        
-        /* 页脚 */
-        .book-footer {{
+        .timestamp {{
             text-align: center;
-            padding: 50px 20px;
-            margin-top: 80px;
-            border-top: 2px solid #ecf0f1;
             color: #95a5a6;
-            font-size: 0.95rem;
-            page-break-before: always;
-        }}
-        
-        /* 打印优化 */
-        @media print {{
-            body {{
-                background: white;
-            }}
-            
-            .book-container {{
-                max-width: 100%;
-                padding: 0;
-            }}
-            
-            a {{
-                color: #2c3e50;
-                border-bottom: none;
-            }}
-            
-            .chapter {{
-                page-break-inside: avoid;
-            }}
-            
-            h1, h2, h3, h4, h5, h6 {{
-                page-break-after: avoid;
-            }}
-            
-            img {{
-                page-break-inside: avoid;
-            }}
-            
-            pre, blockquote {{
-                page-break-inside: avoid;
-            }}
-        }}
-        
-        /* 响应式 */
-        @media screen and (max-width: 768px) {{
-            html {{
-                font-size: 14px;
-            }}
-            
-            .book-container {{
-                padding: 20px 15px;
-            }}
-            
-            .book-cover {{
-                padding: 60px 20px;
-            }}
-            
-            .book-cover h1 {{
-                font-size: 2rem;
-            }}
-            
-            .chapter-title {{
-                font-size: 1.8rem;
-            }}
-            
-            .chapter h1 {{ font-size: 1.7rem; }}
-            .chapter h2 {{ font-size: 1.5rem; }}
-            .chapter h3 {{ font-size: 1.3rem; }}
+            font-size: 0.85em;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #ecf0f1;
         }}
     </style>
+    <!-- MathJax 3.x 配置 - 支持所有LaTeX公式 -->
+    <script>
+        window.MathJax = {{
+            tex: {{
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']],
+                processEscapes: true,
+                processEnvironments: true,
+                tags: 'ams',
+                packages: {{'[+]': ['ams', 'newcommand', 'configmacros']}}
+            }},
+            options: {{
+                skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+                ignoreHtmlClass: 'tex2jax_ignore',
+                processHtmlClass: 'tex2jax_process'
+            }},
+            startup: {{
+                pageReady: () => {{
+                    return MathJax.startup.defaultPageReady().then(() => {{
+                        console.log('MathJax 已加载完成');
+                    }});
+                }}
+            }},
+            svg: {{
+                fontCache: 'global'
+            }}
+        }};
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
 </head>
 <body>
-    <div class="book-container">
-        <!-- 封面 -->
-        <div class="book-cover">
-            <h1>{title}</h1>
-            <div class="book-meta">
-                <p><strong>作者</strong> {author}</p>
-                <p><strong>生成时间</strong> {datetime.now().strftime('%Y年%m月%d日')}</p>
-            </div>
+    <div class="container">
+        <h1>{title}</h1>
+        <div class="meta">
+            <p><strong>平台</strong>: {platform}</p>
+            <p><strong>生成时间</strong>: {generation_time}</p>
+            <p><strong>章节数</strong>: {article_count}</p>
         </div>
-"""
-        
-        # 目录（仅在多篇文章时显示）
-        if len(articles) > 1:
-            html += """
-        <!-- 目录 -->
-        <div class="toc">
-            <h2 class="toc-title">📑 目录</h2>
-            <ul>
-"""
-            for idx, art in enumerate(articles, 1):
-                html += f'                <li><a href="#chapter-{idx}">{idx}. {art.title}</a></li>\n'
-            
-            html += """            </ul>
-        </div>
-"""
-        
-        # 章节内容
-        for idx, art in enumerate(articles, 1):
-            meta_parts = []
-            if art.author:
-                meta_parts.append(f"<strong>作者</strong> {art.author}")
-            if art.date:
-                meta_parts.append(f"<strong>日期</strong> {art.date}")
-            if art.category:
-                meta_parts.append(f"<strong>分类</strong> {art.category}")
-            
-            meta_html = f'<div class="chapter-meta">{" | ".join(meta_parts)}</div>' if meta_parts else ''
-            
-            chapter_title = f"{idx}. {art.title}" if len(articles) > 1 else art.title
-            
-            html += f"""
-        <!-- 章节 {idx} -->
-        <div id="chapter-{idx}" class="chapter">
-            <h1 class="chapter-title">{chapter_title}</h1>
-            {meta_html}
-            <div class="chapter-content">
-                {art.html_content}
-            </div>
-        </div>
-"""
-        
-        # 页脚
-        html += f"""
-        <!-- 页脚 -->
-        <div class="book-footer">
-            <p>本文档由网页内容提取器 v7.0 生成</p>
-            <p>仅供个人学习使用，请勿用于商业用途</p>
-            <p>生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        {articles_html}
+        <div class="timestamp">
+            Generated by Web Content Extractor Pro v8.1
         </div>
     </div>
 </body>
-</html>
-"""
+</html>"""
         
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(html)
-        
-        self.progress_signal.emit(f"✅ HTML: {os.path.basename(path)}")
-    
-    def generate_pdf_professional(self, html_path: str, pdf_path: str):
-        """生成专业书籍风格的PDF - WeasyPrint 59.0+"""
-        try:
-            # 读取HTML内容
-            with open(html_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
+        articles_html = []
+        for idx, article in enumerate(articles, 1):
+            article_html = f'<div class="article">'
+            article_html += f'<h2>{idx}. {article.title}</h2>'
             
-            # 创建字体配置
+            meta_parts = []
+            if article.url:
+                meta_parts.append(f'<a href="{article.url}" target="_blank">查看原文</a>')
+            if article.author:
+                meta_parts.append(f'作者: {article.author}')
+            if article.date:
+                meta_parts.append(f'日期: {article.date}')
+            
+            if meta_parts:
+                article_html += f'<div class="article-meta">{" | ".join(meta_parts)}</div>'
+            
+            article_html += article.html_content
+            article_html += '</div>'
+            articles_html.append(article_html)
+        
+        html_content = html_template.format(
+            title=title,
+            platform=platform,
+            generation_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            article_count=len(articles),
+            articles_html=''.join(articles_html)
+        )
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        self.progress_signal.emit(f"✅ HTML: {os.path.basename(filepath)}")
+    
+    def generate_pdf(self, filepath: str, title: str, articles: List[Article], platform: str):
+        """生成PDF文件 - 优化字体配置"""
+        if not WEASY_AVAILABLE:
+            self.progress_signal.emit("⚠️ WeasyPrint未安装，跳过PDF生成")
+            return
+        
+        try:
+            # 先生成临时HTML
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp:
+                tmp_path = tmp.name
+                self.generate_html(tmp_path, title, articles, platform)
+            
+            # 创建字体配置 - 抑制警告
             font_config = FontConfiguration()
             
-            # PDF专用CSS - 增强打印效果
-            pdf_css = """
-                @page {
-                    size: A4;
-                    margin: 25mm 20mm;
-                }
-                
-                body {
-                    font-family: 'Microsoft YaHei', 'SimSun', 'SimHei', 'PingFang SC', sans-serif;
-                    font-size: 11pt;
-                    line-height: 1.7;
-                }
-                
-                .chapter {
-                    page-break-before: always;
-                }
-                
-                .toc {
-                    page-break-after: always;
-                }
-                
-                h1, h2, h3, h4 {
-                    page-break-after: avoid;
-                }
-                
-                pre, blockquote, table, img {
-                    page-break-inside: avoid;
-                }
-                
-                .math-inline, .math-display {
-                    font-family: 'Times New Roman', 'STIX Two Math', serif;
-                }
-                
-                code {
-                    background: #f4f4f4;
-                    border: 1px solid #ddd;
-                    padding: 2px 6px;
-                    border-radius: 3px;
-                }
-                
-                pre {
-                    background: #2d2d2d;
-                    color: #f8f8f2;
-                    padding: 15px;
-                    border-radius: 5px;
-                    font-size: 9pt;
-                }
-            """
-            
             # 生成PDF
-            html_doc = HTML(string=html_content, base_url=os.path.dirname(html_path))
-            css_doc = CSS(string=pdf_css, font_config=font_config)
-            
-            html_doc.write_pdf(
-                target=pdf_path,
-                stylesheets=[css_doc],
+            HTML(filename=tmp_path).write_pdf(
+                filepath,
+                stylesheets=[CSS(string=self.get_pdf_css())],
                 font_config=font_config
             )
             
-            self.progress_signal.emit(f"✅ PDF: {os.path.basename(pdf_path)}")
+            # 清理临时文件
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
+            
+            self.progress_signal.emit(f"✅ PDF: {os.path.basename(filepath)}")
             
         except Exception as e:
-            import traceback
-            error_msg = f"⚠️ PDF生成失败: {str(e)}\n{traceback.format_exc()}"
-            self.progress_signal.emit(error_msg)
-            print(error_msg)
+            self.progress_signal.emit(f"⚠️ PDF生成失败: {str(e)}")
+    
+    def get_pdf_css(self) -> str:
+        """PDF专用CSS - 优化打印效果"""
+        return """
+        @page {
+            size: A4;
+            margin: 2.5cm 2cm;
+        }
+        body {
+            font-family: "Microsoft YaHei", "SimSun", sans-serif;
+            font-size: 11pt;
+            line-height: 1.7;
+        }
+        .chapter {
+            page-break-before: always;
+        }
+        h1, h2, h3 {
+            page-break-after: avoid;
+        }
+        h1 { font-size: 24pt; }
+        h2 { font-size: 18pt; margin-top: 20pt; }
+        h3 { font-size: 14pt; }
+        .article {
+            page-break-after: always;
+        }
+        .code-block, pre {
+            font-size: 9pt;
+            page-break-inside: avoid;
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+        }
+        img {
+            max-width: 100%;
+            page-break-inside: avoid;
+        }
+        .math-inline {
+            font-family: "Times New Roman", "STIX Two Math", serif;
+        }
+        .math-display {
+            text-align: center;
+            margin: 20px 0;
+            font-family: "Times New Roman", serif;
+        }
+        """
 
 
-# ======================== 主窗口 - GUI增强版 ========================
+# ======================== GUI主窗口 ========================
+
 class MainWindow(QMainWindow):
-    """主窗口 - 大字体、易操作"""
+    """主窗口 - 现代化UI设计"""
     
     def __init__(self):
         super().__init__()
-        self.spider = None
-        self.settings = QSettings('WebContentExtractor', 'v7')
+        self.crawler_thread = None
+        self.settings = QSettings('WebExtractor', 'v8.1')
         self.init_ui()
         self.load_settings()
-        
+    
     def init_ui(self):
-        self.setWindowTitle('🌐 网页内容提取器 v7.0 - 专业增强版')
-        self.setGeometry(100, 100, 1200, 900)
-        self.setMinimumSize(1000, 800)
+        self.setWindowTitle('Web Content Extractor Pro v8.1 - 数学公式优化版')
+        self.setGeometry(100, 100, 1000, 700)
         
-        # 优化样式 - 大字体、专业外观
-        self.setStyleSheet("""
-            QMainWindow {
-                background: #f5f7fa;
-            }
-            QWidget {
-                font-size: 16px;
-            }
-            QGroupBox {
-                border: 2px solid #dfe6e9;
-                border-radius: 10px;
-                margin-top: 20px;
-                padding: 25px 18px 18px 18px;
-                font-weight: 600;
-                font-size: 17px;
-                background: white;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 20px;
-                padding: 0 10px;
-                background: white;
-                font-size: 18px;
-                color: #2c3e50;
-            }
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #667eea, stop:1 #764ba2);
-                color: white;
-                border: none;
-                padding: 16px 28px;
-                border-radius: 8px;
-                font-size: 16px;
-                font-weight: 600;
-                min-width: 130px;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #5568d3, stop:1 #6a3f8f);
-            }
-            QPushButton:pressed {
-                background: #5568d3;
-            }
-            QPushButton:disabled {
-                background: #bdc3c7;
-            }
-            QLineEdit {
-                padding: 14px;
-                border: 2px solid #dfe6e9;
-                border-radius: 8px;
-                background: white;
-                font-size: 16px;
-            }
-            QLineEdit:focus {
-                border: 2px solid #667eea;
-            }
-            QTextEdit {
-                border: 2px solid #dfe6e9;
-                border-radius: 8px;
-                background: white;
-                padding: 14px;
-                font-family: 'Consolas', 'Monaco', monospace;
-                font-size: 15px;
-                line-height: 1.6;
-            }
-            QRadioButton, QCheckBox {
-                spacing: 10px;
-                font-size: 16px;
-            }
-            QRadioButton::indicator, QCheckBox::indicator {
-                width: 20px;
-                height: 20px;
-            }
-            QProgressBar {
-                border: 2px solid #dfe6e9;
-                border-radius: 8px;
-                text-align: center;
-                background: white;
-                height: 35px;
-                font-size: 15px;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #667eea, stop:1 #764ba2);
-                border-radius: 6px;
-            }
-            QLabel {
-                color: #2c3e50;
-                font-size: 16px;
-            }
-        """)
+        # 设置应用字体
+        app_font = QFont('Microsoft YaHei', 10)
+        self.setFont(app_font)
         
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setSpacing(16)
-        layout.setContentsMargins(16, 16, 16, 16)
+        # 中央部件
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
         
-        # 标题
-        title_widget = QWidget()
-        title_widget.setStyleSheet("""
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                stop:0 #667eea, stop:1 #764ba2);
-            border-radius: 12px;
-        """)
-        title_layout = QVBoxLayout(title_widget)
-        title_layout.setContentsMargins(25, 25, 25, 25)
+        # ===== 标题区域 =====
+        title_label = QLabel('📚 Web Content Extractor Pro')
+        title_font = QFont('Microsoft YaHei', 18, QFont.Bold)
+        title_label.setFont(title_font)
+        title_label.setStyleSheet('color: #2c3e50; padding: 10px;')
+        main_layout.addWidget(title_label)
         
-        title_label = QLabel("🌐 网页内容提取器 v7.0")
-        title_label.setFont(QFont('Microsoft YaHei', 24, QFont.Bold))
-        title_label.setStyleSheet("color: white;")
-        title_label.setAlignment(Qt.AlignCenter)
-        
-        subtitle = QLabel("专业版 | PDF书籍风格 | 数学公式增强 | CSDN深度提取 | 大字体GUI")
-        subtitle.setStyleSheet("color: rgba(255,255,255,0.95); font-size: 15px;")
-        subtitle.setAlignment(Qt.AlignCenter)
-        
-        title_layout.addWidget(title_label)
-        title_layout.addWidget(subtitle)
-        layout.addWidget(title_widget)
-        
-        # URL输入
-        url_group = QGroupBox("🔗 输入网址")
+        # ===== URL输入区域 =====
+        url_group = QGroupBox('📎 URL地址')
+        url_group.setFont(QFont('Microsoft YaHei', 11, QFont.Bold))
         url_layout = QVBoxLayout()
-        url_layout.setSpacing(14)
         
-        # 平台选择
-        platform_layout = QHBoxLayout()
-        platform_layout.setSpacing(16)
-        platform_layout.addWidget(QLabel("平台:"))
-        
-        self.runoob_radio = QRadioButton("📘 菜鸟教程")
-        self.csdn_radio = QRadioButton("📙 CSDN博客")
-        self.zhihu_radio = QRadioButton("📗 知乎专栏")
-        self.jianshu_radio = QRadioButton("📕 简书")
-        self.runoob_radio.setChecked(True)
-        
-        platform_layout.addWidget(self.runoob_radio)
-        platform_layout.addWidget(self.csdn_radio)
-        platform_layout.addWidget(self.zhihu_radio)
-        platform_layout.addWidget(self.jianshu_radio)
-        platform_layout.addStretch()
-        url_layout.addLayout(platform_layout)
-        
-        # URL输入
-        url_input_layout = QHBoxLayout()
-        url_input_layout.setSpacing(10)
-        url_label = QLabel("网址:")
-        url_label.setMinimumWidth(50)
-        url_input_layout.addWidget(url_label)
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("粘贴完整URL (支持教程首页、单篇文章、专栏)...")
-        url_input_layout.addWidget(self.url_input, 1)
-        url_layout.addLayout(url_input_layout)
-        
-        # 示例
-        example = QLabel(
-            "💡 支持的URL格式:\n"
-            "• 菜鸟教程: https://www.runoob.com/python3/python3-tutorial.html\n"
-            "• CSDN文章: https://blog.csdn.net/xxx/article/details/123456\n"
-            "• 知乎专栏: https://zhuanlan.zhihu.com/p/123456789\n"
-            "• 简书文章: https://www.jianshu.com/p/123456789abc"
-        )
-        example.setStyleSheet("color: #7f8c8d; font-size: 14px; padding: 12px; background: #f8f9fa; border-radius: 6px;")
-        url_layout.addWidget(example)
+        self.url_input.setPlaceholderText('请输入网页URL...')
+        self.url_input.setFont(QFont('Microsoft YaHei', 10))
+        self.url_input.setMinimumHeight(40)
+        url_layout.addWidget(self.url_input)
         
         url_group.setLayout(url_layout)
-        layout.addWidget(url_group)
+        main_layout.addWidget(url_group)
         
-        # 输出设置
-        output_group = QGroupBox("⚙️ 输出设置")
-        output_layout = QVBoxLayout()
-        output_layout.setSpacing(14)
+        # ===== 平台选择 =====
+        platform_group = QGroupBox('🌐 选择平台')
+        platform_group.setFont(QFont('Microsoft YaHei', 11, QFont.Bold))
+        platform_layout = QHBoxLayout()
+        
+        self.platform_combo = QComboBox()
+        self.platform_combo.addItems([
+            '菜鸟教程 (runoob.com)',
+            'CSDN博客/专栏 (blog.csdn.net)',
+            'GitBook文档 (*.gitbook.io)'
+        ])
+        self.platform_combo.setFont(QFont('Microsoft YaHei', 10))
+        self.platform_combo.setMinimumHeight(35)
+        platform_layout.addWidget(self.platform_combo)
+        
+        platform_group.setLayout(platform_layout)
+        main_layout.addWidget(platform_group)
+        
+        # ===== 输出选项 =====
+        options_group = QGroupBox('⚙️ 输出选项')
+        options_group.setFont(QFont('Microsoft YaHei', 11, QFont.Bold))
+        options_layout = QVBoxLayout()
+        
+        # 输出格式
+        format_layout = QHBoxLayout()
+        format_label = QLabel('输出格式:')
+        format_label.setFont(QFont('Microsoft YaHei', 10))
+        format_layout.addWidget(format_label)
+        
+        self.markdown_check = QCheckBox('Markdown')
+        self.html_check = QCheckBox('HTML')
+        self.pdf_check = QCheckBox('PDF')
+        for cb in [self.markdown_check, self.html_check, self.pdf_check]:
+            cb.setFont(QFont('Microsoft YaHei', 10))
+            cb.setChecked(True)
+            format_layout.addWidget(cb)
+        
+        format_layout.addStretch()
+        options_layout.addLayout(format_layout)
+        
+        # 其他选项
+        self.download_img_check = QCheckBox('下载图片到本地')
+        self.download_img_check.setChecked(True)
+        self.download_img_check.setFont(QFont('Microsoft YaHei', 10))
+        options_layout.addWidget(self.download_img_check)
+        
+        self.aggregate_check = QCheckBox('合并为单个文件（取消则每章独立）')
+        self.aggregate_check.setChecked(True)
+        self.aggregate_check.setFont(QFont('Microsoft YaHei', 10))
+        options_layout.addWidget(self.aggregate_check)
         
         # 输出目录
         dir_layout = QHBoxLayout()
-        dir_layout.setSpacing(10)
-        dir_label = QLabel("目录:")
-        dir_label.setMinimumWidth(50)
+        dir_label = QLabel('输出目录:')
+        dir_label.setFont(QFont('Microsoft YaHei', 10))
         dir_layout.addWidget(dir_label)
-        self.output_path = QLineEdit('./output')
-        dir_layout.addWidget(self.output_path, 1)
-        browse_btn = QPushButton("📁 浏览")
-        browse_btn.setMaximumWidth(120)
-        browse_btn.clicked.connect(self.browse_output_dir)
-        dir_layout.addWidget(browse_btn)
-        output_layout.addLayout(dir_layout)
         
-        # 格式选择
-        format_layout = QHBoxLayout()
-        format_layout.setSpacing(16)
-        format_label = QLabel("格式:")
-        format_label.setMinimumWidth(50)
-        format_layout.addWidget(format_label)
+        self.output_dir_input = QLineEdit('./output')
+        self.output_dir_input.setFont(QFont('Microsoft YaHei', 10))
+        dir_layout.addWidget(self.output_dir_input)
         
-        self.md_check = QCheckBox("📝 Markdown")
-        self.html_check = QCheckBox("🌐 HTML")
-        self.pdf_check = QCheckBox("📄 PDF (专业书籍)")
+        dir_btn = QPushButton('浏览...')
+        dir_btn.setFont(QFont('Microsoft YaHei', 10))
+        dir_btn.clicked.connect(self.select_output_dir)
+        dir_layout.addWidget(dir_btn)
         
-        self.md_check.setChecked(True)
-        self.html_check.setChecked(True)
-        if WEASY_AVAILABLE:
-            self.pdf_check.setChecked(True)
-        else:
-            self.pdf_check.setEnabled(False)
-            self.pdf_check.setToolTip("需要安装 weasyprint")
+        options_layout.addLayout(dir_layout)
+        options_group.setLayout(options_layout)
+        main_layout.addWidget(options_group)
         
-        format_layout.addWidget(self.md_check)
-        format_layout.addWidget(self.html_check)
-        format_layout.addWidget(self.pdf_check)
+        # ===== 控制按钮 =====
+        button_layout = QHBoxLayout()
         
-        self.download_img_check = QCheckBox("🖼️ 下载图片")
-        self.download_img_check.setChecked(True)
-        format_layout.addWidget(self.download_img_check)
+        self.start_btn = QPushButton('🚀 开始提取')
+        self.start_btn.setFont(QFont('Microsoft YaHei', 12, QFont.Bold))
+        self.start_btn.setMinimumHeight(45)
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:pressed {
+                background-color: #21618c;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+            }
+        """)
+        self.start_btn.clicked.connect(self.start_crawl)
+        button_layout.addWidget(self.start_btn)
         
-        # 非聚合模式
-        self.separate_mode_check = QCheckBox("📑 非聚合模式（每篇独立）")
-        self.separate_mode_check.setChecked(False)
-        self.separate_mode_check.setToolTip("勾选后，多篇文章将分别保存为独立文件")
-        format_layout.addWidget(self.separate_mode_check)
-        
-        format_layout.addStretch()
-        output_layout.addLayout(format_layout)
-        
-        if not WEASY_AVAILABLE:
-            pdf_hint = QLabel("💡 安装 weasyprint 以启用PDF功能\n   命令: pip install weasyprint")
-            pdf_hint.setStyleSheet("color: #f39c12; font-size: 14px; padding: 10px;")
-            output_layout.addWidget(pdf_hint)
-        
-        output_group.setLayout(output_layout)
-        layout.addWidget(output_group)
-        
-        # 控制按钮
-        control_layout = QHBoxLayout()
-        control_layout.setSpacing(16)
-        
-        self.start_btn = QPushButton("🚀 开始提取")
-        self.start_btn.clicked.connect(self.start_crawling)
-        self.start_btn.setMinimumHeight(55)
-        
-        self.stop_btn = QPushButton("⏹️ 停止")
-        self.stop_btn.clicked.connect(self.stop_crawling)
+        self.stop_btn = QPushButton('⏹️ 停止')
+        self.stop_btn.setFont(QFont('Microsoft YaHei', 12, QFont.Bold))
+        self.stop_btn.setMinimumHeight(45)
         self.stop_btn.setEnabled(False)
-        self.stop_btn.setMinimumHeight(55)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+            }
+        """)
+        self.stop_btn.clicked.connect(self.stop_crawl)
+        button_layout.addWidget(self.stop_btn)
         
-        open_btn = QPushButton("📂 打开文件夹")
-        open_btn.clicked.connect(self.open_output_folder)
-        open_btn.setMinimumHeight(55)
+        main_layout.addLayout(button_layout)
         
-        control_layout.addWidget(self.start_btn, 2)
-        control_layout.addWidget(self.stop_btn, 1)
-        control_layout.addWidget(open_btn, 1)
-        layout.addLayout(control_layout)
-        
-        # 进度条
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setRange(0, 0)
-        layout.addWidget(self.progress_bar)
-        
-        # 日志
-        log_label = QLabel("📋 运行日志")
-        log_label.setFont(QFont('Microsoft YaHei', 14, QFont.Bold))
-        layout.addWidget(log_label)
+        # ===== 日志区域 =====
+        log_group = QGroupBox('📋 运行日志')
+        log_group.setFont(QFont('Microsoft YaHei', 11, QFont.Bold))
+        log_layout = QVBoxLayout()
         
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(220)
-        layout.addWidget(self.log_text)
+        self.log_text.setFont(QFont('Consolas', 9))
+        self.log_text.setMinimumHeight(200)
+        log_layout.addWidget(self.log_text)
         
-    def browse_output_dir(self):
-        directory = QFileDialog.getExistingDirectory(self, "选择输出目录")
-        if directory:
-            self.output_path.setText(directory)
-            
-    def open_output_folder(self):
-        path = os.path.abspath(self.output_path.text())
-        if os.path.exists(path):
-            if sys.platform == 'win32':
-                os.startfile(path)
-            elif sys.platform == 'darwin':
-                os.system(f'open "{path}"')
-            else:
-                os.system(f'xdg-open "{path}"')
-        else:
-            QMessageBox.warning(self, "提示", "输出目录不存在")
-            
-    def start_crawling(self):
+        clear_btn = QPushButton('清空日志')
+        clear_btn.setFont(QFont('Microsoft YaHei', 9))
+        clear_btn.clicked.connect(self.log_text.clear)
+        log_layout.addWidget(clear_btn)
+        
+        log_group.setLayout(log_layout)
+        main_layout.addWidget(log_group)
+        
+        # 状态栏
+        self.statusBar().showMessage('就绪')
+        self.statusBar().setFont(QFont('Microsoft YaHei', 9))
+    
+    def select_output_dir(self):
+        dir_path = QFileDialog.getExistingDirectory(self, '选择输出目录')
+        if dir_path:
+            self.output_dir_input.setText(dir_path)
+    
+    def log_message(self, message: str):
+        self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        self.log_text.moveCursor(QTextCursor.End)
+    
+    def start_crawl(self):
         url = self.url_input.text().strip()
         if not url:
-            QMessageBox.warning(self, "提示", "请输入URL!")
+            QMessageBox.warning(self, '警告', '请输入URL地址!')
             return
         
-        if not url.startswith('http'):
-            QMessageBox.warning(self, "提示", "请输入完整的URL (以http开头)")
-            return
-        
-        # 检查格式
-        formats = []
-        if self.md_check.isChecked():
-            formats.append('markdown')
+        # 检查输出格式
+        output_formats = []
+        if self.markdown_check.isChecked():
+            output_formats.append('markdown')
         if self.html_check.isChecked():
-            formats.append('html')
+            output_formats.append('html')
         if self.pdf_check.isChecked():
-            formats.append('pdf')
+            output_formats.append('pdf')
         
-        if not formats:
-            QMessageBox.warning(self, "提示", "请至少选择一种输出格式!")
+        if not output_formats:
+            QMessageBox.warning(self, '警告', '请至少选择一种输出格式!')
             return
         
-        # 判断平台
-        if self.runoob_radio.isChecked():
-            platform = 'runoob'
-        elif self.csdn_radio.isChecked():
-            platform = 'csdn'
-        elif self.zhihu_radio.isChecked():
-            platform = 'zhihu'
-        else:
-            platform = 'jianshu'
+        # 确定平台
+        platform_map = {
+            0: 'runoob',
+            1: 'csdn',
+            2: 'gitbook'
+        }
+        platform = platform_map.get(self.platform_combo.currentIndex(), 'runoob')
+        
+        # 保存设置
+        self.save_settings()
         
         # 创建爬虫线程
-        self.spider = CrawlerThread()
-        self.spider.url = url
-        self.spider.platform = platform
-        self.spider.output_dir = self.output_path.text()
-        self.spider.output_formats = formats
-        self.spider.download_images = self.download_img_check.isChecked()
-        self.spider.aggregate_mode = not self.separate_mode_check.isChecked()
+        self.crawler_thread = CrawlerThread()
+        self.crawler_thread.url = url
+        self.crawler_thread.platform = platform
+        self.crawler_thread.output_dir = self.output_dir_input.text()
+        self.crawler_thread.output_formats = output_formats
+        self.crawler_thread.download_images = self.download_img_check.isChecked()
+        self.crawler_thread.aggregate_mode = self.aggregate_check.isChecked()
         
-        self.spider.progress_signal.connect(self.update_progress)
-        self.spider.finished_signal.connect(self.crawl_finished)
+        # 连接信号
+        self.crawler_thread.progress_signal.connect(self.log_message)
+        self.crawler_thread.finished_signal.connect(self.on_crawl_finished)
         
+        # 更新UI
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.progress_bar.setRange(0, 0)
         self.log_text.clear()
+        self.statusBar().showMessage('正在提取...')
         
-        self.spider.start()
-        mode_text = "聚合模式（合并成一个文件）" if self.spider.aggregate_mode else "非聚合模式（每篇独立文件）"
-        self.log("=" * 80)
-        self.log(f"🚀 开始提取")
-        self.log(f"📍 URL: {url}")
-        self.log(f"📦 平台: {platform}")
-        self.log(f"📁 格式: {', '.join(formats)}")
-        self.log(f"📄 模式: {mode_text}")
-        self.log("=" * 80)
-        
-    def stop_crawling(self):
-        if self.spider:
-            self.spider.stop()
-            self.log("⏹️ 正在停止...")
-            
-    def update_progress(self, message: str):
-        self.log(message)
-        
-    def crawl_finished(self, success: bool, message: str):
-        self.log("=" * 80)
-        self.log(message)
-        self.log("=" * 80)
+        # 启动线程
+        self.crawler_thread.start()
+    
+    def stop_crawl(self):
+        if self.crawler_thread and self.crawler_thread.isRunning():
+            self.crawler_thread.stop()
+            self.log_message("⏹️ 用户停止操作")
+            self.statusBar().showMessage('已停止')
+    
+    def on_crawl_finished(self, success: bool, message: str):
+        self.log_message(message)
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(100 if success else 0)
         
         if success:
-            QMessageBox.information(self, "✅ 完成", message)
+            self.statusBar().showMessage('完成!')
+            QMessageBox.information(self, '完成', message)
         else:
-            QMessageBox.critical(self, "❌ 错误", message)
-            
-    def log(self, message: str):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.append(f"[{timestamp}] {message}")
-        self.log_text.moveCursor(QTextCursor.End)
-        
+            self.statusBar().showMessage('失败')
+            QMessageBox.critical(self, '错误', message)
+    
+    def save_settings(self):
+        self.settings.setValue('url', self.url_input.text())
+        self.settings.setValue('platform', self.platform_combo.currentIndex())
+        self.settings.setValue('output_dir', self.output_dir_input.text())
+        self.settings.setValue('markdown', self.markdown_check.isChecked())
+        self.settings.setValue('html', self.html_check.isChecked())
+        self.settings.setValue('pdf', self.pdf_check.isChecked())
+        self.settings.setValue('download_images', self.download_img_check.isChecked())
+        self.settings.setValue('aggregate', self.aggregate_check.isChecked())
+    
     def load_settings(self):
-        output = self.settings.value('output_dir', './output')
-        self.output_path.setText(output)
-        
+        self.url_input.setText(self.settings.value('url', ''))
+        self.platform_combo.setCurrentIndex(int(self.settings.value('platform', 0)))
+        self.output_dir_input.setText(self.settings.value('output_dir', './output'))
+        self.markdown_check.setChecked(self.settings.value('markdown', True, type=bool))
+        self.html_check.setChecked(self.settings.value('html', True, type=bool))
+        self.pdf_check.setChecked(self.settings.value('pdf', True, type=bool))
+        self.download_img_check.setChecked(self.settings.value('download_images', True, type=bool))
+        self.aggregate_check.setChecked(self.settings.value('aggregate', True, type=bool))
+    
     def closeEvent(self, event):
-        self.settings.setValue('output_dir', self.output_path.text())
-        if self.spider and self.spider.isRunning():
+        if self.crawler_thread and self.crawler_thread.isRunning():
             reply = QMessageBox.question(
-                self, 
-                '确认', 
-                '任务正在进行，确定退出吗?',
+                self, '确认退出',
+                '爬虫正在运行，确定要退出吗？',
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.Yes:
-                self.spider.stop()
-                self.spider.wait()
+                self.crawler_thread.stop()
+                self.crawler_thread.wait(3000)
                 event.accept()
             else:
                 event.ignore()
@@ -1927,37 +1523,14 @@ class MainWindow(QMainWindow):
 
 
 # ======================== 主程序入口 ========================
+
 def main():
     app = QApplication(sys.argv)
-    app.setStyle('Fusion')
+    app.setStyle('Fusion')  # 使用Fusion样式
     
-    # 显示启动信息
-    splash = QMessageBox()
-    splash.setWindowTitle("网页内容提取器 v7.0")
-    splash.setIcon(QMessageBox.Information)
-    
-    status_text = "✅ 功能状态:\n\n"
-    status_text += "• Markdown输出: ✅ 可用\n"
-    status_text += "• HTML输出: ✅ GitBook风格\n"
-    status_text += "• 数学公式: ✅ MathJax 3.0 完整支持\n"
-    status_text += "• 图片下载: ✅ 可用\n"
-    status_text += "• 非聚合模式: ✅ 支持独立文件\n"
-    status_text += "• CSDN增强: ✅ 深度内容提取\n"
-    status_text += "• GUI优化: ✅ 大字体易操作\n"
-    
-    if WEASY_AVAILABLE:
-        status_text += "• PDF输出: ✅ 专业书籍风格\n"
-    else:
-        status_text += "• PDF输出: ❌ 未安装\n"
-        status_text += "\n💡 安装PDF支持:\n"
-        status_text += "pip install weasyprint\n"
-    
-    status_text += "\n🌐 支持平台:\n"
-    status_text += "• 菜鸟教程、CSDN、知乎、简书"
-    
-    splash.setText(status_text)
-    splash.setStandardButtons(QMessageBox.Ok)
-    splash.exec_()
+    # 设置全局字体
+    font = QFont('Microsoft YaHei', 10)
+    app.setFont(font)
     
     window = MainWindow()
     window.show()
